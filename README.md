@@ -15,7 +15,7 @@
 ### Contributors (In no particular order)
 Liming Jing(Northeastern University)  
 Jialin Liu(Fudan University)  
-Shouan Wang(China University of Mining & Technology-Beijing)   
+Shouan Wang(Harbin Institute of Technology)   
 WenJun Wan(Institute of Computing, Chinese Academy of Sciences)  
 Xinjie Zhou(Harbin Institute of Technology)  
 Shijie Qiao(Jilin University)  
@@ -31,7 +31,7 @@ Jiarong Liu(Shanghai Jiao Tong University)
 
 **参与人员**（排名不分先后）：
 
-荆黎明（东北大学）、刘嘉林（复旦大学）、汪寿安（中国矿业大学北京）、万文俊（中科院计算所）、周新杰（哈工大）、乔生（吉林大学）、刘嘉荣（上海交通大学）
+荆黎明（东北大学）、刘嘉林（复旦大学）、汪寿安（哈工大）、万文俊（中科院计算所）、周新杰（哈工大）、乔生（吉林大学）、刘嘉荣（上海交通大学）
 
 ## 一、我们的贡献
 1. 为源代码提供了详细的中文注释
