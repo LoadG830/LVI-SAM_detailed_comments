@@ -85,26 +85,37 @@ public:
     // 构造函数
     IMUPreintegration()
     {
-        // 订阅imu原始数据，用下面因子图优化的结果，施加两帧之间的imu预积分量，预测每一个时刻（imu频率）的imu里程计
+        // 订阅imu原始数据，用下面因子图优化的结果，施加两帧之间的imu预积分量，预测每一个时刻（imu频率）的imu里程计，五个参数imuTopic-话题名称（通常为 "/imu/data" 或类似名称）、2000-队列长度：最多缓存 2000 条 IMU 消息、&IMUPreintegration::imuHandler-回调函数：接收到消息后调用 imuHandler、this-回调所属的对象指针、ros::TransportHints().tcpNoDelay()-传输设置：禁用 Nagle 算法，降低延迟
         subImu      = nh.subscribe<sensor_msgs::Imu>  (imuTopic, 2000, &IMUPreintegration::imuHandler, this, ros::TransportHints().tcpNoDelay());
         // 订阅激光里程计，来自mapOptimization，用两帧之间的imu预计分量构建因子图，优化当前帧位姿（这个位姿仅用于更新每时刻的imu里程计，以及下一次因子图优化）
         subOdometry = nh.subscribe<nav_msgs::Odometry>(PROJECT_NAME + "/lidar/mapping/odometry", 5, &IMUPreintegration::odometryHandler, this, ros::TransportHints().tcpNoDelay());
         // 发布imu 里程计
         pubImuOdometry = nh.advertise<nav_msgs::Odometry> ("odometry/imu", 2000);
-        pubImuPath     = nh.advertise<nav_msgs::Path>     (PROJECT_NAME + "/lidar/imu/path", 1);
+        // 发布imu路径
+        pubImuPath     = nh.advertise<nav_msgs::Path>(
+            PROJECT_NAME + "/lidar/imu/path", // 话题名称
+            1                                 // 发布队列大小
+            );
 
         map_to_odom = tf::Transform(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(0, 0, 0));
 
         // imu 预积分的噪声协方差
         boost::shared_ptr<gtsam::PreintegrationParams> p = gtsam::PreintegrationParams::MakeSharedU(imuGravity);
+        // 加速度计白噪声（连续模型）
         p->accelerometerCovariance  = gtsam::Matrix33::Identity(3,3) * pow(imuAccNoise, 2); // acc white noise in continuous
+        // 陀螺仪白噪声（连续模型）
         p->gyroscopeCovariance      = gtsam::Matrix33::Identity(3,3) * pow(imuGyrNoise, 2); // gyro white noise in continuous
+        // 积分过程的额外噪声
         p->integrationCovariance    = gtsam::Matrix33::Identity(3,3) * pow(1e-4, 2); // error committed in integrating position from velocities
+        // 初始 IMU 偏置：假设为零
         gtsam::imuBias::ConstantBias prior_imu_bias((gtsam::Vector(6) << 0, 0, 0, 0, 0, 0).finished());; // assume zero initial bias
 
-        // 噪声先验
+        // 噪声先验，定义因子图中各类先验噪声
+        // 位姿先验噪声（角度：rad，位置：m）
         priorPoseNoise  = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2).finished()); // rad,rad,rad,m, m, m
+        // 速度先验噪声（m/s）
         priorVelNoise   = gtsam::noiseModel::Isotropic::Sigma(3, 1e2); // m/s
+        // 偏置先验噪声
         priorBiasNoise  = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3); // 1e-2 ~ 1e-3 seems to be good
         // 激光里程计scan-to-map优化过程中发生退化，则选择一个较大的协方差
         correctionNoise = gtsam::noiseModel::Isotropic::Sigma(6, 1e-2); // meter
@@ -115,19 +126,23 @@ public:
         imuIntegratorOpt_ = new gtsam::PreintegratedImuMeasurements(p, prior_imu_bias); // setting up the IMU integration for optimization        
     }
 
-    // 重置ISAM2 优化器
+    // 重置ISAM2 优化器，当因子图累积到一定规模（代码中是每 100 帧重置一次）或者系统第一次初始化时，需要重置优化器，以控制计算量和数值稳定性
     void resetOptimization()
     {
-        gtsam::ISAM2Params optParameters;
-        optParameters.relinearizeThreshold = 0.1;
-        optParameters.relinearizeSkip = 1;
-        optimizer = gtsam::ISAM2(optParameters);
+        // 1. 配置 ISAM2 参数
+        gtsam::ISAM2Params optParameters; // 创建一个 ISAM2 参数对象，用来配置增量优化器的行为
+        optParameters.relinearizeThreshold = 0.1; // 当估计值与线性化点的偏差超过 0.1（单位为变量的标度），触发对该变量的重线性化
+        optParameters.relinearizeSkip = 1;  // 每处理 1 个增量步骤，就检查是否需要重线性化
+        
+        // 2. 使用新参数初始化 ISAM2 优化器
+        optimizer = gtsam::ISAM2(optParameters);  // 根据新参数重新构造 ISAM2 优化器对象，旧的状态和因子都会被丢弃
 
+        // 3. 清空因子图和变量值
         gtsam::NonlinearFactorGraph newGraphFactors;
-        graphFactors = newGraphFactors;
+        graphFactors = newGraphFactors;  // 创建并替换一个空的因子图，清除之前所有添加的因子
 
         gtsam::Values NewGraphValues;
-        graphValues = NewGraphValues;
+        graphValues = NewGraphValues;  // 创建并替换一个空的变量值容器，清除之前所有的初始估计值
     }
 
     // 重置参数
@@ -162,12 +177,15 @@ public:
         float r_y = odomMsg->pose.pose.orientation.y;
         float r_z = odomMsg->pose.pose.orientation.z;
         float r_w = odomMsg->pose.pose.orientation.w;
-        int currentResetId = round(odomMsg->pose.covariance[0]);
-        gtsam::Pose3 lidarPose = gtsam::Pose3(gtsam::Rot3::Quaternion(r_w, r_x, r_y, r_z), gtsam::Point3(p_x, p_y, p_z));
 
-        // correction pose jumped, reset imu pre-integration
+        // 检查是否需要重置预积分器（里程计跳变）
+        int currentResetId = round(odomMsg->pose.covariance[0]);
+        gtsam::Pose3 lidarPose = gtsam::Pose3(gtsam::Rot3::Quaternion(r_w, r_x, r_y, r_z), gtsam::Point3(p_x, p_y, p_z)); //构建 LiDAR→IMU 坐标系下的 Pose3
+
+        // correction pose jumped, reset imu pre-integration跳变检测
         if (currentResetId != imuPreintegrationResetId)
-        {
+        {   
+            // 里程计跳变：重置所有状态
             resetParams();
             imuPreintegrationResetId = currentResetId;
             return;
@@ -178,7 +196,7 @@ public:
         // 0. 系统初始化，第一帧
         if (systemInitialized == false)
         {
-            // 重置ISAM2优化器
+            // 重置ISAM2优化器和因子图
             resetOptimization();
 
             // pop old IMU message
