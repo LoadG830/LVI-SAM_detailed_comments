@@ -211,9 +211,34 @@ public:
                 else
                     break;
             }
+
+
+            /*
+            消除系统的整体漂移（Gauge Freedom）
+            因子图优化本质上是在一个由变量（节点）和约束（因子）构成的图上求最优解。
+            如果图中只有“相对”约束（比如 IMU 因子、里程计因子等），那么整体的平移、旋转、速度甚至偏置就没有绝对参考，
+            优化结果会出现任意的全局平移或旋转（漂移现象）。
+            设定初始条件
+            在系统刚启动、还没有任何里程计或 IMU 因子加入的时候，需要给优化器一个“猜测的起点”，让它有东西可以优化。
+            数值稳定性与收敛性
+            合理设置先验的协方差（噪声水平）能够平衡优化的“信心”——
+            协方差设得太大，相当于告诉优化器“对这个先验不太在意”，效果就近似于没有先验，仍然可能导致漂移。
+            协方差设得太小，又会让优化器过度“死守”这个先验，难以校正真实的系统偏差。
+            因此，通过对先验噪声模型的精细调节，可以兼顾对初始状态的约束和系统后续对新观测数据的灵活响应。
+            可扩展性与模块化
+            将先验因子作为独立的节点插入，也方便后续做重新初始化或“重锚”——
+            当检测到里程计跳变或需要重置时，只要丢弃旧图、重新添加新的先验，就能让整个优化过程快速回到稳健状态，不必重新从头积累几十帧的观测。
+            
+            位姿先验（PriorFactor<Pose3>(X(0), prevPose_, priorPoseNoise)）就像给第一个位姿打了一根“锚杆”，
+            告诉优化器“从这里开始，这个节点的绝对位置大致在这里”，从而锁定全局坐标系。
+            速度先验（PriorFactor<Vector3>(V(0), prevVel_, priorVelNoise)）和偏置先验（PriorFactor<imuBias::ConstantBias>(B(0), prevBias_, priorBiasNoise)）
+            分别告诉优化器“初速度大约是零”、“初始 IMU 偏置大约是零”，从而确保优化从一个合理的状态开始。
+            */
+
+            
             // initial pose
             // 添加里程计位姿先验因子
-            prevPose_ = lidarPose.compose(lidar2Imu); // 将当前里程计位姿转换到imu坐标系下
+            prevPose_ = lidarPose.compose(lidar2Imu); // 将当前里程计位姿转换到imu坐标系下，将 lidarPose 转到 IMU 系下，得到 prevPose_，作为变量 X(0) 的先验
             // X(0)表示第一个位姿，有一个先验的约束。约束内容为，lidar到imu下的prevPose_这么一个位姿
             // 该约束的权重，置信度为priorPoseNoise，越小代表置信度越高
             gtsam::PriorFactor<gtsam::Pose3> priorPose(X(0), prevPose_, priorPoseNoise);
@@ -241,7 +266,7 @@ public:
             graphFactors.resize(0);
             graphValues.clear();
 
-            // 重置优化之后的bias
+            // 重置优化之后的bias，同步预积分器：保证预测和优化两路预积分都以相同的初始偏置开始
             imuIntegratorImu_->resetIntegrationAndSetBias(prevBias_);
             imuIntegratorOpt_->resetIntegrationAndSetBias(prevBias_);
             
